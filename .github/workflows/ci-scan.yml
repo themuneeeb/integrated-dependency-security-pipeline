@@ -1,0 +1,95 @@
+name: IDSP Security Pipeline
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  security-scan:
+    runs-on: ubuntu-latest
+    name: Security Scan & Policy Enforcement
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+      
+      - name: Install dependencies
+        run: npm ci
+      
+      - name: Run Snyk Security Scan
+        env:
+          SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
+        run: |
+          npm install -g snyk
+          snyk auth $SNYK_TOKEN
+          
+          echo "=== Running Snyk Dependency Scan ==="
+          snyk test --json > snyk-results.json || true
+          
+          echo "=== Enforcing CVSS-Based Policy ==="
+          node -e "
+            const fs = require('fs');
+            try {
+              const results = JSON.parse(fs.readFileSync('snyk-results.json', 'utf8'));
+              const vulns = results.vulnerabilities || [];
+              
+              const critical = vulns.filter(v => v.severity === 'critical').length;
+              const high = vulns.filter(v => v.severity === 'high').length;
+              const medium = vulns.filter(v => v.severity === 'medium').length;
+              const low = vulns.filter(v => v.severity === 'low').length;
+              
+              console.log('');
+              console.log('╔════════════════════════════════════════════╗');
+              console.log('║    SECURITY SCAN RESULTS - IDSP Layer 2    ║');
+              console.log('╚════════════════════════════════════════════╝');
+              console.log('');
+              console.log('📊 Vulnerability Summary:');
+              console.log('   🔴 Critical: ' + critical);
+              console.log('   🟠 High:     ' + high);
+              console.log('   🟡 Medium:   ' + medium);
+              console.log('   🟢 Low:      ' + low);
+              console.log('');
+              console.log('🚦 CVSS-Based Policy Enforcement:');
+              console.log('   Critical (9.0-10.0): BLOCK deployment');
+              console.log('   High (7.0-8.9):      BLOCK deployment');
+              console.log('   Medium (4.0-6.9):    WARN but allow');
+              console.log('   Low (0.1-3.9):       Allow');
+              console.log('');
+              
+              if (critical > 0 || high > 0) {
+                console.log('❌ BUILD FAILED');
+                console.log('');
+                console.log('Reason: ' + (critical > 0 ? critical + ' critical' : '') + 
+                           (critical > 0 && high > 0 ? ' and ' : '') +
+                           (high > 0 ? high + ' high' : '') + ' severity vulnerabilities detected');
+                console.log('Action: Deployment blocked per CVSS policy');
+                console.log('');
+                console.log('💡 Fix: Review vulnerabilities and update dependencies');
+                console.log('');
+                process.exit(1);
+              } else {
+                console.log('✅ BUILD PASSED');
+                console.log('');
+                console.log('No critical or high severity vulnerabilities found');
+                console.log('Deployment approved');
+                console.log('');
+              }
+            } catch (err) {
+              console.error('❌ Scan failed with vulnerabilities');
+              process.exit(1);
+            }
+          "
+      
+      - name: Upload Scan Results
+        if: always()
+        uses: actions/upload-artifact@v3
+        with:
+          name: snyk-scan-results
+          path: snyk-results.json
